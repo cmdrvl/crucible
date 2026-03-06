@@ -203,7 +203,7 @@ Claims are expected to be messy, overlapping, and contradictory. That's the poin
 
 ### Convergence (the fountain model)
 
-Each property of each table is a **bucket**: `(table, column, property_type)`. Claims pour into buckets from multiple independent sources. The decoder tracks the state of every bucket:
+Each property of each table is a **bucket**: `(table, column, property_type)`. Claims pour into buckets from multiple independent sources. The `decoding` tool tracks the state of every bucket using its convergence engine:
 
 | State | Meaning | Action |
 |-------|---------|--------|
@@ -223,33 +223,35 @@ The key insight from fountain codes: **you don't need every source to be complet
 | NOT NULL / FK / CHECK | DDL alone (confidence 1.0) | Hard constraint |
 | Valid value set | 2+ independent sources agree | App enums may be stale; DDL CHECK is definitive |
 | Usage (which apps query it) | All scanned apps processed | Usage is additive, not convergent |
-| Liveness (alive/dead) | Audit logs + ≥1 app source agree | Both behavioral and structural evidence |
+| Liveness (alive/dead) | Audit logs + 1+ app source agree | Both behavioral and structural evidence |
 | Semantics (what it means) | 2+ sources with consistent interpretation | Column names are ambiguous; usage reveals intent |
 
 **Convergence tells you when to stop scanning.** If you've scanned 3 of 5 apps and 90% of buckets have converged, the marginal value of reverse-engineering the COBOL is measurable: it would fill at most N remaining empty/single-source buckets. If N is small, skip it. If N is large, it's worth the effort. The decision is data-driven, not gut-driven.
 
 **Convergence also tells you where to focus humans.** Conflicted buckets are where expert attention has the highest leverage — two sources disagree, a human resolves it in 30 seconds, the bucket converges. The gap dashboard ranks conflicts by impact (how many downstream data products depend on this bucket?) so humans work the highest-leverage conflicts first.
 
+See `decoding` plan for full convergence model details — bucket state machine, claim shapes, thresholds, and dashboard specification.
+
 ### Convergence on the dashboard
 
 ```
-Buckets: 14,200 total (1000 tables × ~14.2 properties avg)
+Buckets: 14,200 total (1000 tables x ~14.2 properties avg)
 
-  Converged:      11,340  (79.9%)  ████████████████████████████████  — done
-  Converging:      1,420  (10.0%)  ████                              — need 1 more source
-  Single-source:     890  ( 6.3%)  ███                               — low confidence
-  Conflicted:        210  ( 1.5%)  █                                 — needs human
-  Empty:             340  ( 2.4%)  █                                 — undiscovered
+  Converged:      11,340  (79.9%)  --------------------------------  done
+  Converging:      1,420  (10.0%)  ----                              need 1 more source
+  Single-source:     890  ( 6.3%)  ---                               low confidence
+  Conflicted:        210  ( 1.5%)  -                                 needs human
+  Empty:             340  ( 2.4%)  -                                 undiscovered
 
 Sources scanned: 5 of 7 known applications
   Marginal value of next source (python-etl): ~180 buckets (fills 120 single-source, 60 empty)
   Marginal value of next source (cobol-batch): ~40 buckets (fills 30 single-source, 10 empty)
-  → Recommendation: scan python-etl next, defer cobol-batch
+  -> Recommendation: scan python-etl next, defer cobol-batch
 ```
 
 ### Decoding
 
-Decoding resolves converged and conflicted buckets into a canonical understanding:
+`decoding` resolves converged and conflicted buckets into a canonical understanding (see `decoding` plan for full specification):
 
 - **Converged buckets** resolve automatically — the decoder records the canonical value, the contributing claims, and the convergence path.
 - **Conflicted buckets** surface for human review with full context: all competing claims, their sources, their confidence scores, and the specific disagreement. Two apps define different valid values for the same column → the human picks the canonical set and the decision is recorded.
@@ -273,14 +275,14 @@ The Oracle monolith doesn't get replaced by one system. It fragments into data p
 - Surveillance mart (for monitoring)
 - ... dozens more
 
-Each target gets a twin: an in-memory instance with its own schema and verify rules, derived from the decoded claims about what that slice of Oracle actually does.
+Each target gets a **twin pair**: Twin A (legacy schema for replay) and Twin B (target schema for scoring). Schemas are derived from the decoded claims about what that slice of Oracle actually does. See `twinning` plan for the two-twin design specification.
 
 ```bash
-# Boot a twin for the loan performance mart
-twinning postgres --schema loan-perf-schema.sql --rules loan-perf-rules.json --port 5433
+# Twin A: Oracle schema for behavioral replay
+twinning postgres --schema oracle-loan-tables.sql --port 5433
 
-# Boot a twin for the compliance data product
-twinning postgres --schema compliance-schema.sql --rules compliance-rules.json --port 5434
+# Twin B: New data product schema for target scoring
+twinning postgres --schema loan-perf-schema.sql --rules loan-perf-rules.json --port 5434
 ```
 
 ### Tournament scoring
@@ -566,8 +568,8 @@ The original PLAN_FACTORY.md was 2000 lines. This is what we cut and why:
 | Cut | Why |
 |-----|-----|
 | Agent swarm custom framework | Replaced with ntm + git + convergence. The swarm concept survived — the custom orchestration layer didn't. |
-| Fountain code / RaptorQ implementation | The event stream / reactive projector implementation. The convergence *model* survived — it's how claims from multiple shitty sources justify confidence. |
-| Event stream architecture (NATS, Redis Streams) | Premature infrastructure. Claims can be JSONL files for v0. |
+| Fountain code / RaptorQ implementation | The event stream / reactive projector implementation. The convergence *model* survived in `decoding` — it's how claims from multiple shitty sources justify confidence. |
+| Event stream architecture (NATS, Redis Streams) | Premature infrastructure. Claims are JSONL files. `decoding` reads them directly. |
 | Passive projector pattern | Over-abstraction. Decoding reads claims, emits mutations. A function, not a reactive stream. |
 | Governance framework | Important but premature. Ship the factory, then figure out how it decays. |
 | Answer engine (charts, visual artifacts) | Downstream of the core problem. Build it when the data products exist. |
