@@ -125,6 +125,23 @@ Scan every application that touches the database. Expect mess — 20 years of Ja
 | Test files | Domain assertions, edge cases, expected values | 0.8 |
 | Config files / connection strings | Which apps connect to which schemas | 0.9 |
 | Enum definitions / constant tables | Valid value sets | 0.8 |
+| COBOL copybooks | Exact byte-level field layouts (PIC clauses), record structure, data types | 1.0 |
+| JCL job definitions | Program-to-dataset lineage, step dependencies, execution schedules, condition codes | 0.8-0.9 |
+
+### Copybook codec layer
+
+When scan encounters COBOL copybooks, it produces three artifacts from a single parse:
+
+1. **Structural claims** (confidence 1.0) — field names, types, offsets, lengths. `PIC S9(7)V99 COMP-3` declares a signed 7.2 packed decimal at an exact byte offset. No ambiguity.
+2. **Conversion codec** — deterministic EBCDIC-to-ASCII, packed decimal-to-numeric, zone decimal-to-numeric conversion for every field in the record. This codec is how mainframe data enters the spine's text/numeric world.
+3. **Shape definition** — structural compatibility contract for the spine's `shape` tool, generated directly from PIC clauses.
+
+```bash
+factory scan --copybook LOAN-RECORD.cpy --output scan-results/
+# Produces: claims/copybook-loan-record.claims.jsonl
+#           codecs/LOAN-RECORD.codec.json
+#           shapes/LOAN-RECORD.shape.json
+```
 
 ### Inferred fingerprints and profiles
 
@@ -368,7 +385,9 @@ The transformation logic between Twin A and Twin B is itself testable — load t
 
 ### Replay
 
-`factory scan` captured Oracle's historical query patterns from `v$sql` and `dba_hist_sqlstat` — every query every application ran, with frequency and recency. `factory replay` turns those into an executable behavioral test suite:
+`factory scan` captured historical query and execution patterns. `factory replay` turns those into an executable behavioral test suite.
+
+**SQL replay** (Oracle, DB2, SQL Server): Captured from `v$sql`, `dba_hist_sqlstat`, or equivalent. Each historical query replayed verbatim against Twin A.
 
 ```bash
 factory replay --queries scan-results/queries/risk-app.sql \
@@ -378,10 +397,27 @@ factory replay --queries scan-results/queries/risk-app.sql \
 ```
 
 For each historical query:
-1. Run against Oracle (live, or cached result sets from scan)
+1. Run against the legacy system (live, or cached result sets from scan)
 2. Run the same SQL verbatim against Twin A
 3. Compare result sets (row-for-row, column-for-column)
 4. Classify: MATCH, MISMATCH, or SKIP (query uses unsupported SQL features)
+
+**Program execution replay** (COBOL batch jobs): Captured from JCL job streams. Each JCL step maps to one program execution. The unit of replay is a compiled program, not a SQL query. Requires non-SQL twin types (VSAM, flat file) — see `twinning` plan for the generalized interface model.
+
+```bash
+factory replay --jcl scan-results/jobs/NIGHTLY.jcl \
+  --vsam-twin localhost:6000 \
+  --db2-twin localhost:5433 \
+  --mainframe-outputs expected/ \
+  --output replay-results/
+```
+
+For each JCL step:
+1. Set up input datasets (load into appropriate twins — VSAM, DB2, flat file)
+2. Run the COBOL program (compiled via GnuCOBOL) against the twins
+3. Capture output datasets and return codes
+4. Compare outputs against known-good mainframe outputs
+5. Classify: MATCH, MISMATCH, or SKIP (program uses unsupported system services)
 
 ### Replay output
 
@@ -618,3 +654,103 @@ When data flows from Oracle to a data product, it passes through the spine. When
 9. **Evidence sealing** — Pack per data product. Static proof + behavioral proof + assess decision.
 
 Each step is independently useful. You don't need step 9 to get value from step 1.
+
+---
+
+## On COBOL and mainframes
+
+The factory architecture was designed around two modes: document corpus decomposition and legacy SQL database decomposition. But the hardest legacy systems aren't SQL databases — they're COBOL mainframes. A 40-year-old COBOL/VSAM/IMS/CICS system with DB2 is the ultimate test of whether this architecture generalizes. This section analyzes what works, what breaks, and how to solve the gaps without changing the architecture.
+
+### What transfers cleanly
+
+**The convergence model works perfectly.** COBOL mainframes actually have *more* independent sources than Oracle. COBOL programs, JCL job streams, copybooks, DB2 DDL, CICS transaction definitions, batch schedules, operator manuals — each emits claims about what the system does. The fountain model doesn't care that the sources are in COBOL. It cares that they're independent.
+
+**Tournament scoring works identically.** Data is data. `benchmark`, `verify`, `compare`, `assess`, `pack` — none of them know or care that the source was a mainframe. Assemble candidate data, score it, best one wins.
+
+**Evidence sealing works identically.** The spine doesn't touch the source system.
+
+### What works but gets harder
+
+**Scanning COBOL is surprisingly tractable.** COBOL is in some ways *easier* to scan than Java. The `DATA DIVISION` declares every field with exact byte layout — `PIC S9(7)V99 COMP-3` tells you it's a signed 7.2 packed decimal. Copybooks are the schema. You get incredibly precise structural claims at confidence 1.0.
+
+The hard part: COBOL programs are 10,000-50,000 lines of spaghetti maintained for 40 years by copy-paste. You find 12 programs that do almost the same thing with slight variations. The convergence model sees 12 sources "agreeing" — but they're copies, not independent corroboration. The derivation graph in `decoding` handles this via clone detection: diff every program pair, cluster by similarity, each clone cluster votes as one source with weight 1, not as N independent sources. COBOL is the easiest language to do this for — no metaprogramming, no dynamic dispatch, no monkey-patching.
+
+**JCL is the richest claim source on the mainframe.** A single JCL job declares which programs run, in what order, what files each step reads (DD statements map to VSAM datasets, flat files, DB2 tables), what files each step writes, and condition codes for branching. JCL IS the lineage graph. A JCL parser producing claims covers program-to-dataset relationships across the entire mainframe in one pass. JCL is a structured format with well-documented syntax — parsing is tractable.
+
+**DB2 on the mainframe works almost like Oracle.** DB2 has SQL traces, DDL introspection, and the SQL is close enough to Postgres that the twin handles it. Maybe 40-60% of a typical mainframe's data lives in DB2. For that slice, the stack works today.
+
+### The key reframe: the twin is an interface emulator
+
+The twin's core abstraction is "speak the protocol the client expects." That's the right idea — it's just too narrow if we only implement SQL wire protocols. The generalization (specified in the `twinning` plan):
+
+| Interface | Protocol | Twin implementation | LOC estimate |
+|-----------|----------|-------------------|-------------|
+| SQL (DB2/Postgres) | SQL wire protocol | Current twin (pgwire) | ~10-15K (exists) |
+| VSAM | COBOL file I/O (OPEN/READ/WRITE/CLOSE on keyed datasets) | In-memory keyed byte-array store | ~3-4K |
+| IMS/DL/I | Hierarchical navigation (GU/GN/GNP/ISRT/REPL/DLET) | In-memory tree store | ~5-8K |
+| Flat files | Sequential I/O with copybook layout | In-memory byte stream | ~1-2K |
+| CICS | Transaction dispatch (EXEC CICS commands) | Transaction router + API surface mock | Commercial (Micro Focus) or mock top 50 |
+
+The VSAM twin is the highest-value addition. It's simpler than the SQL twin (no query parsing, no planning — just keyed byte-array storage), covers ~30% of mainframe workloads, and combined with GnuCOBOL enables off-mainframe batch job replay.
+
+### The copybook is the schema
+
+A COBOL copybook declares every field with surgical precision:
+
+```cobol
+01 LOAN-RECORD.
+   05 LOAN-ID         PIC X(10).
+   05 BALANCE         PIC S9(9)V99 COMP-3.
+   05 STATUS          PIC X(1).
+   05 RATE            PIC 9V9(5) COMP-3.
+   05 ORIGINATION-DT  PIC 9(8).
+   05 FILLER          PIC X(43).
+```
+
+`PIC S9(9)V99 COMP-3` — signed, 9 integer digits, 2 decimal digits, packed decimal format. Exactly 6 bytes. No ambiguity. No inference needed. The copybook simultaneously produces: structural claims (confidence 1.0), a conversion codec (deterministic EBCDIC/packed decimal to native types), and a `shape` definition. One artifact, three outputs.
+
+### Program execution replay
+
+COBOL batch programs don't issue capturable SQL queries. They run. A nightly batch job reads VSAM datasets, processes records in a `PERFORM` loop, updates DB2 tables, and writes report files. The behavioral equivalence test is: **same inputs, same outputs.**
+
+GnuCOBOL (open source, production-grade) compiles COBOL to native executables. Combined with twins for VSAM/DB2/flat files, you get an off-mainframe execution environment:
+
+1. Capture input state from the mainframe (export VSAM datasets, export DB2 tables, collect flat files)
+2. Load inputs into twins (VSAM twin for VSAM inputs, Postgres twin for DB2 inputs)
+3. Compile and run the COBOL program against the twins
+4. Capture output state (updated datasets, DB2 changes, report files, return codes)
+5. `compare` output vs known-good output from the mainframe
+
+JCL job streams become the replay script. Each JCL step maps to one program execution. Step dependencies map to sequential execution. DD statements map to twin connections. Condition codes map to assertions.
+
+### The 80/20
+
+| Category | % of typical mainframe | Stack coverage |
+|----------|----------------------|---------------|
+| DB2 programs | ~40% | **Works today** — Postgres twin handles DB2 SQL |
+| VSAM batch programs | ~30% | **Solvable** — VSAM twin (~3-4K LOC) + GnuCOBOL |
+| IMS programs | ~10% | **Hard** — IMS twin (~5-8K LOC), subtle navigation semantics |
+| CICS online transactions | ~15% | **Commercial** — Micro Focus, or mock top 50 transactions |
+| Assembler / vendor-specific | ~5% | **Manual** — factory identifies and classifies as SKIP |
+
+The stack as designed handles 40%. With a VSAM twin and GnuCOBOL integration, it handles 70%. Adding IMS gets to 80%. The last 20% is either commercial tooling or manual work — but the factory's contribution is still real: it *finds and classifies* what needs manual handling instead of discovering it mid-migration.
+
+### What's genuinely hard
+
+**IMS.** Hierarchical databases with segment types, PCBs (Program Communication Blocks), SSAs (Segment Search Arguments), and navigational access. `GN` walks depth-first, `GNP` scopes to a subtree, `GU` does keyed lookup with concatenated keys. Implementable but subtle — fewer mainframes use IMS these days (DB2 has been eating its lunch for 20 years), but the ones that do are the hardest migrations.
+
+**CICS.** Full emulation is hundreds of commands — screen management (BMS), inter-program communication, temporary storage queues, transient data, file control, interval control. The pragmatic move: extract CICS transaction logic into testable units, mock the CICS API surface for the top 50 transactions, accept that the long tail gets manual testing. Or use Micro Focus Enterprise Server commercially.
+
+**Vendor extensions.** Programs that call assembler subroutines, use vendor-specific COBOL extensions (IBM vs Micro Focus vs Fujitsu), or depend on mainframe system services (RACF for security, SMF for auditing, HSM for storage management). These don't migrate — they get replaced. The factory's job is to identify them, classify them as SKIP, and surface them for human handling.
+
+### What the architecture needs
+
+Three additions to the existing stack, none of which change the architecture:
+
+1. **Generalized twin interface** — The twin becomes an interface emulator with pluggable protocol backends: Postgres, VSAM, IMS, flat files. Same in-memory storage and constraint enforcement layer, different protocols. (Specified in the `twinning` plan.)
+
+2. **Copybook codec layer** — Copybook parsing produces structural claims + conversion codec + shape definition from a single artifact. This bridges mainframe byte-level data into the spine's text/numeric world. (Specified in factory scan above.)
+
+3. **Program execution replay** — Extend replay from "SQL query replay" to "program execution replay." JCL step maps to compile COBOL + run against twins + capture outputs + compare. Same MATCH/MISMATCH/SKIP reporting, different execution unit. (Specified in factory replay above.)
+
+The convergence model, tournament scoring, evidence sealing, gold set flywheel, agent swarm — all unchanged. The factory scans different sources, the decoder resolves different claim shapes, the twins speak different protocols. The proof infrastructure is the same.
