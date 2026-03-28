@@ -1,16 +1,18 @@
 # Crucible — Phase 1
 
 ## One-line promise
-**Turn a legacy estate into deterministic archaeology claims with enough
-coverage and provenance to support one bounded replacement outcome.**
+**Turn a legacy estate into a deterministic metadata catalog plus derived
+archaeology claims, with enough coverage and provenance to support one bounded
+replacement outcome.**
 
 This repo is no longer carrying the whole end-state Crucible vision as an
 implementation plan. Phase 1 is intentionally smaller:
 
 - ship `crucible scan`
-- emit stable `claim.v0` files
+- hydrate the metadata catalog
+- emit stable `claim.v0` files only where direct observation is insufficient
 - support one real legacy outcome slice
-- feed `decoding`
+- feed `decoding` only where convergence is actually needed
 
 Everything else is deferred until we learn from real slices.
 
@@ -30,9 +32,10 @@ For Hyperion-style knockouts, the first job is not:
 The first job is:
 
 1. inventory the relevant legacy surfaces
-2. extract deterministic claims from them
-3. preserve provenance tightly enough that humans can resolve ambiguity
-4. hand those claims to `decoding`
+2. hydrate a deterministic metadata catalog from direct observations
+3. derive claims only for ambiguous, inferential, or multi-source propositions
+4. preserve provenance tightly enough that humans can resolve ambiguity
+5. hand only those derived claims to `decoding`
 
 If Phase 1 does that well, one outcome slice can be scanned, understood, and
 rebuilt with a mostly manual replacement loop.
@@ -76,10 +79,13 @@ crucible scan files ...
 
 and receive:
 
-- content-addressed claim files
+- catalog records for applications, tables, files, jobs, reports, feeds,
+  consumers, and lineage edges
+- content-addressed claim files only for contested or inferential propositions
 - an inventory of what was scanned
 - a scan report showing coverage and gaps
-- enough evidence for `decoding` to converge the first map of the slice
+- enough evidence for `decoding` to converge only the parts of the slice that
+  observation alone cannot settle
 
 That is the Phase 1 bar.
 
@@ -97,7 +103,72 @@ case:
 
 Not every source inside those surfaces has to be parsed on day one. But the
 scan layer must be able to ingest artifacts from all four classes and emit
-claims or explicit "unparsed but inventoried" entries with provenance.
+catalog records, derived claims, or explicit "unparsed but inventoried" entries
+with provenance.
+
+---
+
+## Catalog-first architecture
+
+`crucible scan` should primarily behave like a metadata hydration engine, not a
+claims-only feeder for `decoding`.
+
+The default path is:
+
+1. observe a thing directly
+2. normalize it into the metadata/catalog model
+3. attach provenance and lineage
+4. only emit `claim.v0` if the proposition is inferred, ambiguous, or in
+   tension with other evidence
+
+That means `decoding` is not the hot path for plain scan facts.
+
+Examples that should go straight into the catalog:
+
+- table and column existence
+- file and artifact inventory
+- directly observed applications, jobs, reports, feeds, mappings, and
+  consumers
+- mechanically extractable lineage and dependency edges
+- linked-node relationships recoverable without ambiguity
+
+Examples that should produce `claim.v0` for `decoding`:
+
+- valid-value sets inferred from multiple repos and exports
+- liveness or staleness assessments
+- authoritative-output claims
+- semantic labels or business meaning hints
+- dependency edges that are only weakly inferred or contradicted elsewhere
+
+---
+
+## Relationship to `cmdrvl-cli metadata`
+
+Phase 1 should explicitly leverage the metadata model already exposed by
+`cmdrvl-cli metadata`, rather than inventing a parallel catalog abstraction.
+
+The existing metadata surfaces already cover the core scan targets:
+
+- tables and columns
+- files
+- custom resources
+- custom links
+- linked-node traversal
+- lineage graph nodes and edges
+
+So `crucible scan` should treat `cmdrvl-cli metadata` as the primary catalog
+shape for observed facts. In practice that means:
+
+- DB objects hydrate table-oriented metadata records
+- file and export inventories hydrate file metadata records
+- applications, jobs, reports, feeds, mappings, and consumers hydrate custom
+  resource records
+- direct dependencies and lineage edges hydrate metadata links
+- cross-surface neighborhoods and execution paths should be expressible through
+  linked-node / lineage graph structures
+
+`crucible` may stage local artifacts first, but the model it targets should
+remain aligned with `cmdrvl-cli metadata`.
 
 ---
 
@@ -120,7 +191,8 @@ crucible scan files
 ### `crucible scan db`
 
 Purpose: inspect a legacy database or exported database metadata and emit
-claims about structure, usage hints, and liveness evidence.
+catalog records plus derived claims about structure, usage hints, and liveness
+evidence.
 
 Minimum inputs:
 
@@ -129,8 +201,9 @@ Minimum inputs:
 
 Minimum outputs:
 
-- `claim.v0` for tables, columns, constraints, views, procedures, jobs, and
-  observed usage/liveness evidence
+- metadata records for tables, columns, and direct lineage/dependency edges
+- custom resource / link hydration where the DB scan can observe it directly
+- `claim.v0` only for ambiguous usage/liveness propositions
 - scan report summarizing covered objects and blind spots
 
 ### `crucible scan repo`
@@ -149,8 +222,10 @@ Minimum Phase 1 coverage:
 
 Minimum outputs:
 
-- `claim.v0` for reads, writes, joins, valid values, semantic labels, and
-  consumer dependencies
+- metadata records for directly observed applications, reports, feeds,
+  consumers, and dependencies
+- `claim.v0` for inferred reads, writes, valid values, semantic labels, and
+  consumer dependencies that require interpretation
 - file-level provenance for every emitted claim
 
 ### `crucible scan files`
@@ -171,13 +246,42 @@ Typical inputs:
 
 Minimum outputs:
 
-- `claim.v0` where adapters exist
+- metadata records where adapters exist
+- `claim.v0` where the adapter yields only inferential or contested
+  propositions
 - inventory records plus provenance when adapters do not exist yet
 - scan report listing parsed vs inventoried-only artifacts
 
 ---
 
-## Phase 1 data model
+## Phase 1 output model
+
+Phase 1 has two output classes:
+
+1. **Catalog hydration artifacts**
+   Direct observed metadata normalized toward the `cmdrvl-cli metadata` model.
+2. **Derived claim artifacts**
+   `claim.v0` records for propositions that need convergence.
+
+Observed metadata does not need `decoding`.
+
+### Catalog hydration targets
+
+The Phase 1 scan layer should be able to populate or stage data equivalent to:
+
+- table metadata
+- file metadata
+- custom resources for applications, jobs, reports, feeds, mappings, consumers
+- custom links between those nodes
+- lineage graph nodes and edges
+
+The exact write path may be:
+
+- direct metadata API upserts
+- deterministic staged JSON artifacts that `cmdrvl-cli metadata` can ingest
+- a local catalog snapshot file that mirrors the metadata shapes
+
+But the target model should remain aligned with `cmdrvl-cli metadata`.
 
 ### `claim.v0`
 
@@ -215,6 +319,8 @@ Rules:
 - every claim carries a concrete provenance pointer
 - confidence is scanner-owned, not model-inferred
 - no hidden enrichment
+
+`claim.v0` is a secondary output of scan, not the only output of scan.
 
 ### Frozen Phase 1 field contract
 
@@ -316,6 +422,12 @@ The claim contract should be reproducible byte-for-byte:
 
 ```text
 scan-results/
+├── catalog/
+│   ├── tables.json
+│   ├── files.json
+│   ├── resources.json
+│   ├── links.json
+│   └── lineage.json
 ├── claims/
 │   ├── db.claims.jsonl
 │   ├── repo.claims.jsonl
@@ -327,8 +439,9 @@ scan-results/
 └── scan-report.json
 ```
 
-The exact filenames can vary, but this three-part shape may not:
+The exact filenames can vary, but this four-part shape may not:
 
+- catalog
 - claims
 - inventory
 - report
@@ -358,13 +471,15 @@ Crucible Phase 1 is implementation-ready when the plan supports shipping:
 1. `crucible scan db`
 2. `crucible scan repo`
 3. `crucible scan files`
-4. stable `claim.v0`
-5. scan report with coverage / blind spots
-6. deterministic reruns for identical inputs
+4. stable catalog hydration output aligned with `cmdrvl-cli metadata`
+5. stable `claim.v0`
+6. scan report with coverage / blind spots
+7. deterministic reruns for identical inputs
 
 Crucible Phase 1 is functionally successful when one real legacy outcome slice
-can be scanned across all relevant surfaces and the resulting claims are good
-enough for `decoding` to produce a useful first canonical map.
+can be scanned across all relevant surfaces, the directly observed metadata can
+hydrate the catalog cleanly, and the resulting derived claims are good enough
+for `decoding` to produce a useful first canonical map where needed.
 
 ---
 
@@ -386,102 +501,70 @@ to code without reopening design questions:
    - subject-id normalizer
    - subject-ref/value helpers
 
-3. **Inventory writer**
+3. **Catalog writer**
+   - deterministic catalog records aligned with `cmdrvl-cli metadata`
+   - resource/link staging for non-table scan entities
+   - lineage graph staging
+   - provenance attachment for observed facts
+
+4. **Inventory writer**
    - deterministic inventory records for scanned inputs
    - `artifact_id` generation
    - parsed-vs-inventoried-only classification
 
-4. **`scan db` v0**
+5. **`scan db` v0**
    - table / column / constraint extraction
    - view / procedure inventory
    - accessible job metadata extraction
+   - direct catalog hydration for observed DB objects
    - provenance locators for every emitted claim
 
-5. **`scan repo` v0**
+6. **`scan repo` v0**
    - SQL literal extraction for Java and Python
    - config / connection discovery
+   - catalog hydration for directly observed apps / reports / feeds / consumers
    - enum / constant scanning for `valid_values` and `semantic_label`
    - file-range provenance
 
-6. **`scan files` v0**
+7. **`scan files` v0**
    - recursive inventory
    - high-value adapters for scheduler exports, logs, and structured extracts
+   - catalog hydration for parseable file/report/export artifacts
    - inventory-only fallback when parsing is not implemented
 
-7. **Scan report**
+8. **Scan report**
+   - catalog counts by node / edge type
    - claim counts by source kind and property type
    - inventoried-only counts
    - blind-spot summary
    - subject coverage summary
 
-8. **Determinism tests**
-   - identical input rerun produces identical claims and report
+9. **Determinism tests**
+   - identical input rerun produces identical catalog, claims, and report
    - mixed-source fixture test for one bounded legacy slice
    - normalization tests for subject IDs and claim hashing
 
-Phase 1 coding should start only after the first two checklist items are
-frozen.
-
----
-
-## Implementation order
-
-1. **Claim contract**
-   Freeze `claim.v0`, scanner identifiers, provenance rules, and output
-   directory layout.
-
-2. **`scan db`**
-   Ship the highest-confidence scanner first. Tables, columns, PK/FK, NOT NULL,
-   CHECK, views, procedures, and accessible job metadata.
-
-3. **`scan repo`**
-   Ship SQL string extraction, connection/config discovery, and obvious enum /
-   model scanning.
-
-4. **`scan files`**
-   Ship filesystem inventory plus a small number of high-value adapters for
-   logs, exports, and report artifacts.
-
-5. **Scan report**
-   Summarize scanned sources, emitted claims, inventoried-only artifacts, and
-   major blind spots.
-
-Everything after that is Phase 2+.
-
----
-
-## Deferred after Phase 1
-
-These are explicitly parked:
-
-- `crucible decompose`
-- `crucible transform`
-- `crucible replay`
-- `crucible tournament`
-- coverage dashboard beyond the scan report
-- twin integration
-- generic swarm framework
-- message bus / event-stream infrastructure
-
-If we build one or two real outcome slices and find ourselves repeating manual
-steps around replacement assembly, then we promote the next abstraction into a
-real Phase 2 plan.
+Phase 1 coding should start only after the catalog target model and claim
+boundary are frozen.
 
 ---
 
 ## Relationship to `decoding`
 
-Crucible Phase 1 stops at claims.
+Crucible Phase 1 stops at catalog hydration plus derived claims.
 
 ```text
 legacy estate
   -> crucible scan
-  -> claim.v0 JSONL
-  -> decoding archaeology mode
+  -> metadata catalog / lineage / inventory
+  -> optional claim.v0 JSONL for ambiguous or inferential propositions
+  -> decoding archaeology mode only where needed
 ```
 
 Crucible does not decide truth in Phase 1. It discovers and records evidence.
-`decoding` converges that evidence into a canonical map.
+Most directly observed metadata should bypass `decoding` and land in the
+catalog. `decoding` converges only the parts of the evidence stream that are
+actually claim-resolution problems.
 
 ---
 
@@ -494,8 +577,9 @@ We should attempt the first Hyperion slice once all of the following are true:
 - the relevant repos can be scanned
 - surrounding artifacts can at least be inventoried, even if not all are
   parsed yet
+- scan outputs can hydrate the metadata catalog without ad hoc translation
 - claim output is stable and deterministic
-- `decoding` can consume the emitted claim files without translation glue
+- `decoding` can consume the derived claim files without translation glue
 
 That is enough to start learning. It is not enough to automate the whole
 program, and it does not need to be.
