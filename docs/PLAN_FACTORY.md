@@ -35,7 +35,8 @@ The first job is:
 2. hydrate a deterministic metadata catalog from direct observations
 3. derive claims only for ambiguous, inferential, or multi-source propositions
 4. preserve provenance tightly enough that humans can resolve ambiguity
-5. hand only those derived claims to `decoding`
+5. connect observations into evidence neighborhoods with per-subject readiness
+6. hand only those derived claims to `decoding`
 
 If Phase 1 does that well, one outcome slice can be scanned, understood, and
 rebuilt with a mostly manual replacement loop.
@@ -84,6 +85,8 @@ and receive:
 - content-addressed claim files only for contested or inferential propositions
 - an inventory of what was scanned
 - a scan report showing coverage and gaps
+- evidence neighborhoods linking catalog, claims, and inventory into a
+  navigable graph with per-subject readiness classification
 - enough evidence for `decoding` to converge only the parts of the slice that
   observation alone cannot settle
 
@@ -492,15 +495,97 @@ scan-results/
 │   ├── db.inventory.json
 │   ├── repo.inventory.json
 │   └── files.inventory.json
+├── neighborhoods/
+│   ├── nodes.json
+│   └── edges.json
 └── scan-report.json
 ```
 
-The exact filenames can vary, but this four-part shape may not:
+The exact filenames can vary, but this five-part shape may not:
 
 - catalog
 - claims
 - inventory
+- neighborhoods
 - report
+
+---
+
+## Evidence neighborhoods
+
+A scan produces flat outputs — catalog records, claims, inventory entries. But
+the value of scanning comes from the connections between outputs from different
+scanners.
+
+Every subject discovered by scan has an **evidence neighborhood**: the connected
+subgraph of all catalog records, claims, inventory entries, and lineage edges
+that relate to it across all scan surfaces.
+
+### Why neighborhoods are a Phase 1 concern
+
+The evidence neighborhood of the target outcome IS the replacement scope.
+
+Walking outward from `hyperion.close_pack_ebitda`:
+
+- the report references views → `v_close_pack`
+- the view joins tables → `gl_actuals`, `mapping_table`
+- repo scan found code reading those tables → `close_report.java`
+- that code references a load job → `fdmee.actuals_load`
+- file scan found scheduler exports for that job
+
+That connected subgraph is the complete archaeological context for the outcome
+slice. Every node reachable from the target is in-scope for replacement.
+Everything unreachable is out.
+
+### Per-node readiness classification
+
+Every node in an evidence neighborhood carries a readiness signal derived from
+its evidence quality:
+
+| Classification | Meaning | Derived from |
+|---------------|---------|--------------|
+| `observed` | Fully in catalog, no contested claims | Catalog records only |
+| `contested` | In catalog but has open claims needing convergence | Catalog + claims |
+| `inventoried` | Scanned but not parsed | Inventory records only |
+| `referenced` | Mentioned by other nodes but never directly scanned | Inferred from edges |
+
+The readiness classification is computed, not scanner-assigned. It falls out of
+which output channels contain records for a given subject.
+
+### Neighborhood as composition primitive
+
+The three scan subcommands produce independent outputs. The evidence
+neighborhood is how they compose:
+
+- `scan db` nodes connect to `scan repo` nodes through shared table/view
+  references
+- `scan repo` nodes connect to `scan files` nodes through config paths and
+  artifact references
+- `scan files` nodes connect to `scan db` nodes through export/load
+  relationships
+
+No manifest file needed. The graph is the composition.
+
+### Neighborhood scope for `decoding`
+
+`decoding` should receive claims in the context of their evidence neighborhood,
+not as flat JSONL. A liveness claim about `fin.gl_actuals` is dramatically
+easier to converge when it arrives alongside the catalog records showing which
+code reads it, which jobs load it, and which reports consume it.
+
+### Neighborhood output
+
+The neighborhood graph is a computed artifact built from the combined outputs of
+all scanners. It should be deterministic and content-addressed like every other
+scan output.
+
+The graph should be emittable as:
+
+- a node list with readiness classification per node
+- an edge list with edge types (dependency, lineage, reference)
+- per-neighborhood summary (node count by readiness, edge count by type)
+
+The scan report should surface neighborhood topology alongside flat counts.
 
 ---
 
@@ -530,12 +615,15 @@ Crucible Phase 1 is implementation-ready when the plan supports shipping:
 4. stable catalog hydration output aligned with `cmdrvl-cli metadata`
 5. stable `claim.v0`
 6. scan report with coverage / blind spots
-7. deterministic reruns for identical inputs
+7. evidence neighborhoods with per-subject readiness classification
+8. deterministic reruns for identical inputs
 
 Crucible Phase 1 is functionally successful when one real legacy outcome slice
 can be scanned across all relevant surfaces, the directly observed metadata can
-hydrate the catalog cleanly, and the resulting derived claims are good enough
-for `decoding` to produce a useful first canonical map where needed.
+hydrate the catalog cleanly, the evidence neighborhood of the target outcome
+is navigable with clear readiness classification, and the resulting derived
+claims are good enough for `decoding` to produce a useful first canonical map
+where needed.
 
 ---
 
@@ -589,41 +677,59 @@ to code without reopening design questions:
    - catalog hydration for parseable file/report/export artifacts
    - inventory-only fallback when parsing is not implemented
 
-8. **Scan report**
+8. **Evidence neighborhood builder**
+   - node list aggregated from catalog records, claims, and inventory entries
+   - edge list derived from lineage edges, dependency links, and subject
+     references across scan surfaces
+   - per-node readiness classification (observed / contested / inventoried /
+     referenced)
+   - neighborhood traversal from a seed subject outward
+   - deterministic, content-addressed graph output
+
+9. **Scan report**
    - catalog counts by node / edge type
    - claim counts by source kind and property type
    - inventoried-only counts
+   - neighborhood topology: node count by readiness classification, edge count
+     by type, reachable subgraph from target outcome
    - blind-spot summary
    - subject coverage summary
 
-9. **Determinism tests**
-   - identical input rerun produces identical catalog, claims, and report
-   - mixed-source fixture test for one bounded legacy slice
-   - normalization tests for subject IDs and claim hashing
-   - classification tests proving observed facts stay on catalog channel and
-     inferred facts become claims
+10. **Determinism tests**
+    - identical input rerun produces identical catalog, claims, neighborhoods,
+      and report
+    - mixed-source fixture test for one bounded legacy slice
+    - normalization tests for subject IDs and claim hashing
+    - classification tests proving observed facts stay on catalog channel and
+      inferred facts become claims
+    - neighborhood stability: same inputs produce identical graph structure and
+      readiness classifications
 
-Phase 1 coding should start only after the catalog target model and claim
-boundary are frozen.
+Phase 1 coding should start only after the catalog target model, claim
+boundary, and neighborhood graph schema are frozen.
 
 ---
 
 ## Relationship to `decoding`
 
-Crucible Phase 1 stops at catalog hydration plus derived claims.
+Crucible Phase 1 stops at catalog hydration, evidence neighborhoods, and
+derived claims.
 
 ```text
 legacy estate
   -> crucible scan
   -> metadata catalog / lineage / inventory
+  -> evidence neighborhoods with per-subject readiness
   -> optional claim.v0 JSONL for ambiguous or inferential propositions
   -> decoding archaeology mode only where needed
 ```
 
 Crucible does not decide truth in Phase 1. It discovers and records evidence.
 Most directly observed metadata should bypass `decoding` and land in the
-catalog. `decoding` converges only the parts of the evidence stream that are
-actually claim-resolution problems.
+catalog. Evidence neighborhoods connect observations across scan surfaces and
+classify readiness per subject. `decoding` converges only the parts of the
+evidence stream that are actually claim-resolution problems, receiving claims
+in the context of their surrounding neighborhood.
 
 ---
 
@@ -637,6 +743,8 @@ We should attempt the first Hyperion slice once all of the following are true:
 - surrounding artifacts can at least be inventoried, even if not all are
   parsed yet
 - scan outputs can hydrate the metadata catalog without ad hoc translation
+- evidence neighborhoods are navigable from the target outcome to its full
+  dependency boundary
 - claim output is stable and deterministic
 - `decoding` can consume the derived claim files without translation glue
 
