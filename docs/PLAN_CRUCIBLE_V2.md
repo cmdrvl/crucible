@@ -5,12 +5,21 @@
 > substrate, structured concurrency via asupersync, and a clean boundary to
 > decoding.
 
+Related target architecture: [The Evidence Machine](../../cmdrvl-context/docs/02-architecture/evidence-machine.md).
+
 ## Core thesis
 
 Crucible is the archaeology brain. Its job is to discover what exists in an
 environment, collect evidence from multiple sources, and produce structured
 claims about what it found. It does not resolve conflicting claims (that's
 decoding) and it does not own the metadata catalog (that's cmdrvl-cli).
+
+Its orchestration scope is deliberately local: **one bounded archaeology
+assignment and its detector regions**. Crucible is not the private CMD+RVL
+evidence runtime. When a larger inquiry needs archaeology, the Evidence Machine
+invokes Crucible as one public operator family, admits its assessment and
+receipts into the larger evidence graph, and retains ownership of the global
+plan, budget, lifecycle, and final seal.
 
 ## Architecture layers
 
@@ -31,6 +40,7 @@ decoding) and it does not own the metadata catalog (that's cmdrvl-cli).
 └─────────────────────────────────────────────────────────┘
 
 Optional integrations (not dependencies):
+  ← Evidence Machine       (invokes Crucible through public Evidence Protocol)
   → cmdrvl-cli metadata  (catalog read/write via shell-out)
   → decoding             (claim resolution when conflicts exist)
 ```
@@ -39,13 +49,15 @@ Optional integrations (not dependencies):
 
 **Crucible skill** (top):
 - Decides which detector skills to invoke for a given target environment
-- Orchestrates loops, multi-pass investigation, swarm coordination
+- Orchestrates loops, multi-pass investigation, and detector coordination
+  inside one bounded archaeology assignment
 - Handles LLM-assisted interpretation where needed
 - Produces the final assessment report
-- This is the user-facing entry point
+- This is the standalone user-facing entry point and the operator-mode façade
 
 **Crucible Rust crate** (middle):
-- Asupersync-based execution engine for parallel detector regions
+- Asupersync-based execution engine for this assignment's parallel detector
+  regions, not a general evidence-workflow runtime
 - `claim.v0` contract: content-addressed claims with confidence and provenance
 - Subject-identity normalization: merge signals about the same entity
 - Corroboration scoring: multiple independent signals agreeing raises confidence
@@ -97,17 +109,57 @@ The skill layer is already LLM-powered by definition (skills are agent-
 orchestrated). The LLM intelligence that crucible needs is not a new dependency
 — it's the skill runtime that was always going to be there.
 
-## Three jobs, three systems
+## Four jobs, four systems
 
 | Job | System | Question it answers |
 |-----|--------|-------------------|
-| Run parallel detectors with lifecycle discipline | asupersync | "How do we execute concurrent investigation safely?" |
+| Run one archaeology assignment's parallel detectors with lifecycle discipline | asupersync inside Crucible | "How do we execute this bounded investigation safely?" |
 | Collect, normalize, and corroborate claims | crucible | "What exists, and what do we believe about it?" |
 | Resolve conflicting claims via policy | decoding | "When claims disagree, which one wins?" |
+| Compile and supervise a larger evidence graph | Evidence Machine | "What is the minimum authorized work that can close this inquiry?" |
 
-These compose but don't overlap. Crucible does not resolve conflicts — it
+These compose but do not overlap. Crucible does not resolve conflicts — it
 identifies them. Decoding does not discover subjects — it receives claims.
-Asupersync does not understand claims — it manages task lifecycle.
+Asupersync does not understand claims — it manages task lifecycle. Evidence
+Machine may schedule a Crucible assignment but does not reinterpret Crucible's
+domain outputs or reach inside its detector regions.
+
+## Relationship to Evidence Machine and Foundry
+
+The architecture has a strict product/runtime/operator distinction:
+
+```text
+CMD+RVL Foundry        tenant outcomes, review, delivery, product interaction
+        |
+        v
+Evidence Machine       private plan, grant, source, run, budget, receipt, seal
+        |
+        v
+Crucible               public bounded archaeology operator and assessment
+        |
+        v
+detector plugins       direct observations and scoped claims
+```
+
+Crucible exposes the same archaeology semantics in two hosting modes:
+
+1. **Standalone:** a human or agent invokes Crucible directly with a target,
+   profile, scoped authority, and output directory.
+2. **Operator mode:** Evidence Machine invokes Crucible behind the public
+   Evidence Protocol, supplies a narrowed capability grant, and receives
+   content-addressed observations, claims, coverage, system-boundary proposals,
+   assessment artifacts, and terminal receipts.
+
+The public Crucible repository must not import private Evidence Machine crates.
+Its integration contract comes from public `operator.v1`, artifact, receipt,
+and conformance types published through `spine-rules`. This preserves a useful
+standalone tool, allows independent verification, and keeps the proprietary
+composition layer above rather than hidden inside the detector.
+
+Foundry never calls detector plugins directly. It requests a tenant outcome
+from Evidence Machine; the compiled plan decides whether Crucible archaeology
+is necessary. This prevents product UI state, runtime state, and archaeology
+evidence from collapsing into one application.
 
 ## System boundaries
 
@@ -526,7 +578,10 @@ connectors_required:
 This makes the engagement's external access requirements explicit, auditable,
 and scope-controlled before anything runs.
 
-## Two modes of value
+## Three composition modes
+
+These modes are composable rather than mutually exclusive. Catalog integration
+is an optional read/write adapter in either standalone or Evidence Machine mode.
 
 ### Standalone (no catalog)
 
@@ -535,7 +590,21 @@ report of what was found in an environment. This has independent value as a
 deliverable — a consultant can hand it to a client and say "here's what we
 found, here's what's uncertain, here's what conflicts."
 
-Output: assessment report + claims + evidence neighborhoods.
+Output: assessment report + direct observations + claims + coverage + proposed
+system boundaries + evidence neighborhoods + terminal receipts.
+
+### Through Evidence Machine
+
+Crucible runs as one bounded `operator.v1` node inside a larger inquiry. The
+Evidence Machine supplies the target artifact refs, profile, pinned detector
+registry, capability handles, budget slice, and disclosure class. Crucible
+returns observations, claims, conflicts, coverage, proposed boundaries, its
+assessment, and terminal receipts without acquiring broader runtime authority.
+
+This is the preferred mode when archaeology bootstraps Portfolio Identity Mesh
+or Ontology Foundry. Crucible establishes what the environment exposes; the
+downstream identity and semantic operators establish what those observations
+justify.
 
 ### With catalog (cmdrvl-cli integration)
 
@@ -574,10 +643,12 @@ independent detectors corroborating the same subject.
 The execution pattern:
 
 1. Spawn detector regions in parallel (one per surface type)
-2. Each detector emits claims as it finds evidence
+2. Each detector emits direct observations and, only where inference is
+   unavoidable, explicit claims as it finds evidence
 3. Crucible's convergence engine continuously merges and scores
 4. When a detector finishes or times out, it drains with evidence
-5. Drain output is itself a claim: "I looked here and found nothing" is signal
+5. Drain output is a coverage/receipt artifact: "I looked here and found
+   nothing" is evidence of completed empty scope, not a positive domain claim
 6. Region closes to quiescence — all detectors complete, all evidence captured
 
 The drain-as-evidence property is why asupersync matters from day one. A
@@ -786,13 +857,19 @@ If the client wants a canonical API model, the conflicts get fed to decoding:
 
 ### Phase 0: Contract freeze
 - Finalize `claim.v0` wire format (already mostly done in PLAN_FACTORY)
+- Define direct-observation, coverage, proposed-boundary, and archaeology
+  assessment payloads under the public Evidence Protocol
 - Define subject-identity normalization contract
 - Define assessment output schema
-- Define detector → crucible interface (how a detector emits claims)
+- Define detector → Crucible interface (how a detector distinguishes an
+  observation, inferential claim, terminal receipt, and coverage result)
+- Map Crucible's standalone invocation to public `operator.v1` inputs, outputs,
+  effects, recovery actions, and receipt obligations without importing private
+  Evidence Machine crates
 
 ### Phase 1: Rust crate core
 - Asupersync integration: region management, detector lifecycle
-- Claim ingestion and storage
+- Observation and claim ingestion and storage
 - Subject-identity normalizer (deterministic merge rules)
 - Corroboration scorer
 - Conflict detector
@@ -813,7 +890,12 @@ If the client wants a canonical API model, the conflicts get fed to decoding:
 - Multi-pass investigation loops (find gap → spawn targeted detector)
 - Ship as `crucible archaeology <target>` or similar
 
-### Phase 4: Catalog integration
+### Phase 4: Integration adapters
+- Prove Evidence Machine operator mode against the same frozen standalone
+  fixture: narrowed grant in; content-addressed observations, claims, coverage,
+  boundaries, assessment, and terminal receipts out
+- Prove that Foundry reaches Crucible only through an Evidence Machine plan,
+  never through product-specific detector calls
 - Shell-out to `cmdrvl-cli metadata read` for diff
 - Shell-out to `cmdrvl-cli metadata write` for hydration
 - Drift detection mode: scheduled re-scan → compare → report changes
@@ -878,9 +960,12 @@ Phase 0.5: Skill-only proof of concept (days, not months)
 ─────────────────────────────────────────────────────────
 - Implement the laptop-audit as a Claude Code skill
 - Six detector scripts (bash/python): process, git, dns, cloud-config, browser, docker
-- Each emits claims as plain JSONL to a temp directory
-- The skill reads all claims, does convergence (LLM-assisted), produces report
-- Output: a structured assessment as markdown + JSONL claims
+- Each emits direct observations and explicit inferential claims as JSONL to a
+  temp directory
+- The skill reads observations and claims, does convergence (LLM-assisted),
+  and produces a report
+- Output: a structured assessment plus machine-readable observations, claims,
+  coverage, and boundary proposals
 - No Rust crate, no asupersync, no plugin system, no FCP
 - Validates: does multi-detector convergence actually find things the catalog missed?
 ```
